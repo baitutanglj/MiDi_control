@@ -34,6 +34,42 @@ def disabled_train(self, mode=True):
     does not change anymore."""
     return self
 
+class GateResidue(torch.nn.Module):
+    def __init__(self, input_dims: utils.PlaceHolder, full_gate:bool=True):
+        super(GateResidue, self).__init__()
+        self.input_dims = input_dims
+        if full_gate:
+            self.gate_X = torch.nn.Linear((input_dims.X + input_dims.charges) * 3, input_dims.X + input_dims.charges)
+            self.gate_E = torch.nn.Linear(input_dims.E * 3, input_dims.E)
+            self.gate_pos = torch.nn.Linear(input_dims.pos * 3, input_dims.pos)
+            self.gate_y = torch.nn.Linear(input_dims.y * 3, input_dims.y)
+        else:
+            self.gate_X = torch.nn.Linear(input_dims.X * 3, 1)
+            self.gate_E = torch.nn.Linear(input_dims.E * 3, 1)
+            self.gate_pos = torch.nn.Linear(input_dims.pos * 3, 1)
+            # self.gate_y = torch.nn.Linear(input_dims.y * 3, 1)
+
+    def forward(self, x, res):
+        x_X_tmp = torch.cat((x.X, x.charges), dim=-1)
+        res_X_tmp = torch.cat((res.X, res.charges), dim=-1)
+        g_X = self.gate_X(torch.cat((
+            x_X_tmp,
+            res_X_tmp,
+            x_X_tmp - res_X_tmp), dim=-1)).sigmoid()
+        g_E = self.gate_E(torch.cat((x.E, res.E, x.E - res.E), dim=-1)).sigmoid()
+        g_pos = self.gate_pos(torch.cat((x.pos, res.pos, x.pos - res.pos), dim=-1)).sigmoid()
+        # g_y = self.gate_y(torch.cat((x.y, res.y, x.y - res.y), dim=-1)).sigmoid()
+
+
+        X = x_X_tmp * g_X + res_X_tmp * (1 - g_X)
+        E = x.E * g_E + res.E * (1 - g_E)
+        pos = x.pos * g_pos + res.pos * (1 - g_pos)
+        E = 1 / 2 * (E + torch.transpose(E, 1, 2))
+        out = utils.PlaceHolder(X=X[..., :self.input_dims.X], charges=X[..., self.input_dims.X:],
+                                E=E, pos=pos, y=res.y, node_mask=res.node_mask).mask()
+        return out
+
+
 class FullDenoisingDiffusion(pl.LightningModule):
     model_dtype = torch.float32
     best_val_nll = 1e8
@@ -49,16 +85,19 @@ class FullDenoisingDiffusion(pl.LightningModule):
         self.cfg = cfg
         self.name = cfg.general.name
         self.T = cfg.model.diffusion_steps
-        self.condition_control = cfg.model.condition_control if 'condition_control' in cfg.model.keys() else False
-        self.only_last_control = cfg.model.only_last_control if 'only_last_control' in cfg.model.keys() else False
-        self.features_last_control = cfg.model.features_last_control if 'features_last_control' in cfg.model.keys() else False
+        self.condition_control = cfg.model.condition_control if hasattr(self.cfg.model, "condition_control") else False
+        self.only_last_control = cfg.model.only_last_control if hasattr(self.cfg.model, "only_last_control") else False
+        self.features_last_control = cfg.model.features_last_control if hasattr(self.cfg.model, "features_last_control") else False
         self.guess_mode = cfg.model.guess_mode
-        self.features_layer_control = cfg.model.features_layer_control if 'features_layer_control' in cfg.model.keys() else []
+        self.features_layer_control = cfg.model.features_layer_control if hasattr(self.cfg.model, "features_layer_control") else []
+        # self.control_scales = [cfg.model.strength * (0.825 ** float(cfg.model.n_layers//2 - i)) for i in range(cfg.model.n_layers//2+2)]
         self.control_scales = [cfg.model.strength * (0.825 ** float(12 - i)) for i in range(13)]
         self.unconditional_guidance_scale = cfg.model.unconditional_guidance_scale
         if self.features_last_control is False:
             if len(self.features_layer_control)==0:
-                self.features_layer_control = list(range(cfg.model.n_layers))
+                self.features_layer_control = list(range(cfg.model.n_layers//2))
+        self.control_data_dict = cfg.dataset.control_data_dict if hasattr(self.cfg.dataset, "control_data_dict") else {'cX': 'cX', 'cE': 'cE', 'cpos': 'cpos'}
+        self.control_add_noise_dict = cfg.dataset.control_add_noise_dict if hasattr(self.cfg.dataset, "control_add_noise_dict") else {'cX': False, 'cE': False, 'cpos': False}
         # self.val_template_num = cfg.general.val_template_num
         # self.test_template_num = cfg.general.test_template_num
         self.val_template = val_template
@@ -123,6 +162,10 @@ class FullDenoisingDiffusion(pl.LightningModule):
                                              hidden_mlp_dims=cfg.model.hidden_mlp_dims,
                                              hidden_dims=cfg.model.hidden_dims,
                                              output_dims=self.output_dims)
+
+
+        # self.output_model = GateResidue(input_dims=self.output_dims, full_gate=True)
+
         self.instantiate_model_stage()
 
         if cfg.model.transition == 'uniform':
@@ -149,12 +192,38 @@ class FullDenoisingDiffusion(pl.LightningModule):
         for param in self.model.parameters():
             param.requires_grad = False
 
+    def on_train_epoch_end(self) -> None:
+        self.print(f"Train epoch {self.current_epoch} ends")
+        tle_log = self.train_loss.log_epoch_metrics()
+        self.print(f"Epoch {self.current_epoch} finished: epoch loss: {tle_log['train_epoch/epoch_loss'] :.5f} -- "
+                   f"pos: {tle_log['train_epoch/pos_mse'] :.5f} -- "
+                   f"X: {tle_log['train_epoch/x_CE'] :.5f} --"
+                   f" charges: {tle_log['train_epoch/charges_CE']:.5f} --"
+                   f" E: {tle_log['train_epoch/E_CE'] :.5f} --"
+                   f" y: {tle_log['train_epoch/y_CE'] :.5f} -- {time.time() - self.start_epoch_time:.2f}s ")
+        self.log_dict(tle_log, batch_size=self.BS)
+        # if self.local_rank == 0:
+        tme_log = self.train_metrics.log_epoch_metrics(self.current_epoch, self.local_rank)
+        if tme_log is not None:
+            self.log_dict(tme_log, batch_size=self.BS)
+        if wandb.run:
+            wandb.log({"epoch": self.current_epoch}, commit=False)
+
+    def on_train_epoch_start(self) -> None:
+        self.print("Starting epoch", self.current_epoch)
+        self.start_epoch_time = time.time()
+        self.train_loss.reset()
+        self.train_metrics.reset()
+
+
     def training_step(self, data, i):
         if data.edge_index.numel() == 0:
             print("Found a batch with no edges. Skipping.")
             return
-        dense_data = utils.to_dense(data, self.dataset_infos)
+        # print(i)
+        dense_data = utils.to_dense(data, self.dataset_infos, self.control_data_dict)
         z_t = self.noise_model.apply_noise(dense_data)
+        # print(f"local_rank {self.local_rank} {z_t.X.shape}")
         extra_data = self.extra_features(z_t)
         pred = self.forward(z_t, extra_data)
         loss, tl_log_dict = self.train_loss(masked_pred=pred, masked_true=dense_data,
@@ -174,7 +243,7 @@ class FullDenoisingDiffusion(pl.LightningModule):
         self.val_metrics.reset()
 
     def validation_step(self, data, i):
-        dense_data = utils.to_dense(data, self.dataset_infos)
+        dense_data = utils.to_dense(data, self.dataset_infos, self.control_data_dict)
         z_t = self.noise_model.apply_noise(dense_data)
         extra_data = self.extra_features(z_t)
         pred = self.forward(z_t, extra_data)
@@ -229,7 +298,7 @@ class FullDenoisingDiffusion(pl.LightningModule):
         self.test_metrics.reset()
 
     def test_step(self, data, i):
-        dense_data = utils.to_dense(data, self.dataset_infos)
+        dense_data = utils.to_dense(data, self.dataset_infos, self.control_data_dict)
         z_t = self.noise_model.apply_noise(dense_data)
         extra_data = self.extra_features(z_t)
         pred = self.forward(z_t, extra_data)
@@ -445,6 +514,12 @@ class FullDenoisingDiffusion(pl.LightningModule):
         # chains.pos[-1] = pos[:keep_chain]
         # chains.idx[-1] = idx[:keep_chain]
 
+        # sample_n_nodes = []
+        # for mean in (n_nodes):
+        #     std_dev = torch.sqrt(mean // 2)
+        #     nodes = torch.randint(low=int(mean - 2 * std_dev), high=int(mean + 2 * std_dev), size=(1,))
+        #     sample_n_nodes.append(nodes)
+        # sample_n_nodes = torch.cat(sample_n_nodes)
         molecule_list, molecules_visualize = [], []
         for i in range(batch_size):
             n = n_nodes[i]
@@ -500,17 +575,20 @@ class FullDenoisingDiffusion(pl.LightningModule):
         print(f"{len(template)} template, sampel {samples_to_generate}")
         max_size = max([i.num_nodes for i in template])
         template = Batch.from_data_list(sum([list(itertools.repeat(i, samples_to_generate)) for i in template], []))
-        potential_ebs = effective_batch_size(max_size, self.cfg.train.reference_batch_size, sampling=True) \
+        # potential_ebs = effective_batch_size(max_size, self.cfg.train.reference_batch_size, sampling=True) \
+        #     if self.cfg.dataset.adaptive_loader else math.ceil(8 * self.cfg.train.batch_size)
+        potential_ebs = self.cfg.train.reference_batch_size \
             if self.cfg.dataset.adaptive_loader else math.ceil(8 * self.cfg.train.batch_size)
-        print(f"potential_ebs:{8 * self.cfg.train.batch_size}")
+        print(f"potential_ebs:{potential_ebs}")
         template_loader = DataLoader(template, potential_ebs, shuffle=True)
         for i, template_batch in enumerate(template_loader):
             # chains_save = chains_to_save if len(template_batch)>=chains_to_save else len(template_batch)
             template_batch = template_batch.cuda(self.device)
-            dense_data = utils.to_dense(template_batch, self.dataset_infos)
+            dense_data = utils.to_dense(template_batch, self.dataset_infos, self.control_data_dict)
             dense_data.idx = template_batch.idx
             current_n_list = torch.unique(template_batch.batch, return_counts=True)[1]
-            samples.extend(self.sample_batch(n_nodes=current_n_list, batch_id=i, template=dense_data,
+            n_nodes = current_n_list
+            samples.extend(self.sample_batch(n_nodes=n_nodes, batch_id=i, template=dense_data,
                                              save_final=len(current_n_list), keep_chain=chains_save,
                                              number_chain_steps=self.number_chain_steps, test=test))
             chains_save = 0
@@ -524,11 +602,11 @@ class FullDenoisingDiffusion(pl.LightningModule):
     def apply_model(self, model_input, condition_control):
         if condition_control:
             control_out = self.control_model(model_input)
-            control_out = {ckey: control_out[ckey].control_scales(scale) for ckey, scale in zip(control_out, self.control_scales)}
+            control_out = {ckey: control_out[ckey].mul_scales(scale) for ckey, scale in zip(control_out, self.control_scales)}
             model_out = self.model(model_input, control_out, self.only_last_control, self.features_last_control, self.features_layer_control)
         else:
             control_out = None
-            model_out = self.model(model_input, control_out, self.only_last_control, self.features_last_control, self.features_layer_control)
+            model_out = self.model(model_input, control_out, None, None, None)
 
         return model_out
 
@@ -542,32 +620,12 @@ class FullDenoisingDiffusion(pl.LightningModule):
         model_uncond = self.apply_model(model_input, False)
 
         model_t = model_t.minus_scales(model_uncond, model_t.node_mask)
-        model_t_scale = model_t.control_scales(self.unconditional_guidance_scale)
-        model_out = model_uncond.minus_scales(model_t_scale, model_t_scale.node_mask)
+        model_t_scale = model_t.mul_scales(self.unconditional_guidance_scale)
+        model_out = model_uncond.add_scales(model_t_scale, model_t_scale.node_mask)
+        ## model_out = model_t
+        # model_out = self.output_model(model_uncond, model_t)
 
         return model_out
-
-    def on_train_epoch_end(self) -> None:
-        self.print(f"Train epoch {self.current_epoch} ends")
-        tle_log = self.train_loss.log_epoch_metrics()
-        self.print(f"Epoch {self.current_epoch} finished: pos: {tle_log['train_epoch/pos_mse'] :.2f} -- "
-                   f"X: {tle_log['train_epoch/x_CE'] :.2f} --"
-                   f" charges: {tle_log['train_epoch/charges_CE']:.2f} --"
-                   f" E: {tle_log['train_epoch/E_CE'] :.2f} --"
-                   f" y: {tle_log['train_epoch/y_CE'] :.2f} -- {time.time() - self.start_epoch_time:.1f}s ")
-        self.log_dict(tle_log, batch_size=self.BS)
-        # if self.local_rank == 0:
-        tme_log = self.train_metrics.log_epoch_metrics(self.current_epoch, self.local_rank)
-        if tme_log is not None:
-            self.log_dict(tme_log, batch_size=self.BS)
-        if wandb.run:
-            wandb.log({"epoch": self.current_epoch}, commit=False)
-
-    def on_train_epoch_start(self) -> None:
-        self.print("Starting epoch", self.current_epoch)
-        self.start_epoch_time = time.time()
-        self.train_loss.reset()
-        self.train_metrics.reset()
 
     def on_fit_start(self) -> None:
         self.train_iterations = 100      # TODO: fix -- previously was len(self.trainer.datamodule.train_dataloader())
@@ -580,7 +638,15 @@ class FullDenoisingDiffusion(pl.LightningModule):
 
     def configure_optimizers(self):
         # lr = self.cfg.train.lr
-        params = self.control_model.parameters() if self.condition_control else self.model.parameters()
+        control_params = self.control_model.parameters() if self.condition_control else self.model.parameters()
+        # params = list(control_params) + list(self.output_model.parameters())
         # params = self.parameters()
-        return torch.optim.AdamW(params, lr=self.cfg.train.lr, amsgrad=True,
+        control_optimizer = torch.optim.AdamW(control_params, lr=self.cfg.train.lr, amsgrad=True,
                                  weight_decay=self.cfg.train.weight_decay)
+        StepLR = torch.optim.lr_scheduler.ReduceLROnPlateau(control_optimizer, mode='min', factor=0.5, patience=3, verbose=True,
+                                                   threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0,
+                                                   eps=1e-08)
+        optim_dict = {'optimizer': control_optimizer, 'lr_scheduler': StepLR, "monitor": 'train_epoch/epoch_loss'}
+        # optim_dict = [control_optimizer, output_optimizer]
+
+        return optim_dict

@@ -1,7 +1,7 @@
-import matplotlib.hatch
+import math
+
 import torch
 import torch.nn.functional as F
-import numpy as np
 
 import midi.utils as utils
 from midi.diffusion import diffusion_utils
@@ -195,6 +195,71 @@ class NoiseModel:
         prefactor = a_s * (1 - alpha_ratio_sq * sigma_ratio_sq)
         return prefactor.float()
 
+    def control_data_add_noise(self, dense_data):
+        node_mask = dense_data.node_mask
+        bs, n = node_mask.shape
+        inverse_edge_mask = ~(node_mask.unsqueeze(1) * node_mask.unsqueeze(2))
+        diag_mask = torch.eye(n).unsqueeze(0).expand(bs, -1, -1)
+
+        # if self.control_add_noise_dict['cX']:
+        #     cX = F.softmax(dense_data.cX + torch.normal(mean=0, std=0.05, size=dense_data.cX.shape,
+        #                                                 device=dense_data.cX.device), dim=-1)
+        #     cX[~node_mask] = 1 / cX.shape[-1]
+        #     ccharges = F.softmax(dense_data.ccharges + torch.normal(mean=0, std=0.05, size=dense_data.ccharges.shape,
+        #                                                             device=dense_data.ccharges.device), dim=-1)
+        #     ccharges[~node_mask] = 1 / ccharges.shape[-1]
+        # else:
+        #     cX = dense_data.cX
+        #     ccharges = dense_data.ccharges
+        #
+        # if self.control_add_noise_dict['cE']:
+        #     probcE = torch.normal(mean=0, std=0.05, size=dense_data.cE.shape, device=dense_data.cE.device)
+        #     cE = F.softmax(dense_data.cE + probcE, dim=-1)
+        #     cE[inverse_edge_mask] = 1 / cE.shape[-1]
+        # else:
+        #     cE = dense_data.cE
+        #
+        # if self.control_add_noise_dict['cpos']:
+        #     cpos = dense_data.cpos + torch.normal(mean=0, std=0.05, size=dense_data.cpos.shape,
+        #                                           device=dense_data.cpos.device)
+        #     cpos_masked = cpos*dense_data.node_mask.unsqueeze(-1)
+        #     cpos = utils.remove_mean_with_mask(cpos_masked, dense_data.node_mask)
+        # else:
+        #     cpos = dense_data.cpos
+
+        # *************************************#
+        ######cX, ccharge add noise#####
+        cX = F.softmax(dense_data.cX + torch.normal(mean=0, std=0.3, size=dense_data.cX.shape, device=dense_data.cX.device), dim=-1)
+        cX[~node_mask] = 1 / cX.shape[-1]
+        ccharges = F.softmax(dense_data.ccharges + torch.normal(mean=0, std=0.3, size=dense_data.ccharges.shape, device=dense_data.ccharges.device), dim=-1)
+        ccharges[~node_mask] = 1 / ccharges.shape[-1]
+        ######cX, ccharge not noise#####
+        # cX = dense_data.cX
+        # ccharges = dense_data.ccharges
+        #*************************************#
+
+        ######cE add noise#####
+        probcE = torch.normal(mean=0, std=0.3, size=dense_data.cE.shape, device=dense_data.cE.device)
+        cE = F.softmax(dense_data.cE + probcE, dim=-1)
+        cE[inverse_edge_mask] = 1 / cE.shape[-1]
+        ######cE not add noise#####
+        # cE = dense_data.cE
+        # *************************************#
+
+        ######cpos add noise#####
+        cpos = dense_data.cpos + torch.normal(mean=0, std=0.3, size=dense_data.cpos.shape, device=dense_data.cpos.device)
+        cpos_masked = cpos*dense_data.node_mask.unsqueeze(-1)
+        cpos = utils.remove_mean_with_mask(cpos_masked, dense_data.node_mask)
+        ######cE not add noise#####
+        # cpos = dense_data.cpos
+        # *************************************#
+
+        control_data = utils.PlaceHolder(X=dense_data.X, charges=dense_data.charges, E=dense_data.E, y=dense_data.y, pos=dense_data.pos,
+                                         cX=cX, ccharges=ccharges, cE=cE, cy=dense_data.cy,
+                                         cpos=cpos, node_mask=dense_data.node_mask).mask()
+        return control_data
+
+
     def apply_noise(self, dense_data):
         """ Sample noise and apply it to the data. """
         device = dense_data.X.device
@@ -226,9 +291,14 @@ class NoiseModel:
         s = self.get_sigma_bar(t_int=t_int, key='p').unsqueeze(-1)
         pos_t = a * dense_data.pos + s * noise_pos_masked
 
+        # control_data = dense_data
+        control_data = self.control_data_add_noise(dense_data)
         z_t = utils.PlaceHolder(X=X_t, charges=charges_t, E=E_t, y=dense_data.y, pos=pos_t, t_int=t_int,
                                 t=t_float, node_mask=dense_data.node_mask,
-                                cX=dense_data.cX, ccharges=dense_data.ccharges, cE=dense_data.cE, cy=dense_data.cy, cpos=dense_data.cpos).mask()
+                                cX=control_data.cX, ccharges=control_data.ccharges, cE=control_data.cE, cy=control_data.cy, cpos=control_data.cpos).mask()
+        # z_t = utils.PlaceHolder(X=X_t, charges=charges_t, E=E_t, y=dense_data.y, pos=pos_t, t_int=t_int,
+        #                         t=t_float, node_mask=dense_data.node_mask,
+        #                         cX=dense_data.cX, ccharges=dense_data.ccharges, cE=dense_data.cE, cy=dense_data.cy, cpos=dense_data.cpos).mask()
         return z_t
 
     def get_limit_dist(self):
@@ -285,9 +355,17 @@ class NoiseModel:
 
         t_array = pos.new_ones((pos.shape[0], 1))
         t_int_array = self.T * t_array.long()
+
+        # control_data = template
+        control_data = self.control_data_add_noise(template)
         return utils.PlaceHolder(X=U_X, charges=U_c, E=U_E, y=U_y, pos=pos, t_int=t_int_array, t=t_array,
-                                 node_mask=node_mask, cX=template.cX, ccharges=template.ccharges,
-                                 cE=template.cE, cy=template.cy, cpos=template.cpos, idx=template.idx).mask(node_mask)
+                                 node_mask=node_mask, cX=control_data.cX, ccharges=control_data.ccharges,
+                                 cE=control_data.cE, cy=control_data.cy, cpos=control_data.cpos, idx=template.idx).mask(node_mask)
+
+
+        # return utils.PlaceHolder(X=U_X, charges=U_c, E=U_E, y=U_y, pos=pos, t_int=t_int_array, t=t_array,
+        #                          node_mask=node_mask, cX=template.cX, ccharges=template.ccharges,
+        #                          cE=template.cE, cy=template.cy, cpos=template.cpos, idx=template.idx).mask(node_mask)
 
     def sample_zs_from_zt_and_pred(self, z_t, pred, s_int):
         """Samples from zs ~ p(zs | zt). Only used during sampling. """
@@ -392,6 +470,8 @@ class DiscreteUniformTransition(NoiseModel):
         self.Pcharges = torch.ones(1, self.charges_classes, self.charges_classes) / self.charges_classes
         self.Pe = torch.ones(1, self.E_classes, self.E_classes) / self.E_classes
         self.Pe = torch.ones(1, self.y_classes, self.y_classes) / self.y_classes
+        self.control_add_noise_dict = cfg.model.control_add_noise_dict if 'control_add_noise_dict' in cfg.model.keys() else {
+            'cX': False, 'cE': False, 'cpos': False}
 
 
 class MarginalUniformTransition(NoiseModel):
@@ -410,3 +490,4 @@ class MarginalUniformTransition(NoiseModel):
         self.Pe = e_marginals.unsqueeze(0).expand(self.E_classes, -1).unsqueeze(0)
         self.Pcharges = charges_marginals.unsqueeze(0).expand(self.charges_classes, -1).unsqueeze(0)
         self.Py = torch.ones(1, self.y_classes, self.y_classes) / self.y_classes
+        self.control_add_noise_dict = cfg.model.control_add_noise_dict if 'control_add_noise_dict' in cfg.model.keys() else {'cX': False, 'cE': False, 'cpos': False}

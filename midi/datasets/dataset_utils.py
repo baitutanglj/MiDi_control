@@ -25,12 +25,15 @@ def mol_to_torch_geometric(mol, atom_encoder, smiles):
     all_charges = torch.Tensor(all_charges).long()
 
     #control data
-    control_atom_types = (atom_types != 0).long()
-    # control_atom_types = torch.ones_like(atom_types)
+    # control_atom_types = (atom_types != 0).long()
+    control_atom_types = torch.full_like(atom_types, atom_encoder['C'])
     control_charges = torch.zeros_like(all_charges)
+    control_edge_attr = (edge_attr != 0).long()
+    ##add noise
+    # control_pos = pos+torch.normal(mean=0, std=0.01, size=(5,))
 
     data = Data(x=atom_types, edge_index=edge_index, edge_attr=edge_attr, pos=pos, charges=all_charges, smiles=smiles,
-                cx=control_atom_types, ccharges=control_charges)
+                cx=control_atom_types, ccharges=control_charges, cedge_attr=control_edge_attr, id=mol.GetProp('_Name'))
 
     return data
 
@@ -54,11 +57,18 @@ def remove_hydrogens(data: Data):
     new_edge_index, new_edge_attr = subgraph(to_keep, data.edge_index, data.edge_attr, relabel_nodes=True,
                                              num_nodes=len(to_keep))
     new_pos = data.pos[to_keep] - torch.mean(data.pos[to_keep], dim=0)
-    return Data(x=data.x[to_keep] - 1,         # Shift onehot encoding to match atom decoder
+    new_cedge_attr = (new_edge_attr != 0).long()
+    return Data(x=data.x[to_keep] - 1,
+                edge_index=new_edge_index,# Shift onehot encoding to match atom decoder
+                edge_attr=new_edge_attr,
                 pos=new_pos,
                 charges=data.charges[to_keep],
-                edge_index=new_edge_index,
-                edge_attr=new_edge_attr)
+                smiles=data.smiles,
+                cx=data.cx[to_keep]-1,
+                ccharges=data.ccharges[to_keep],
+                cedge_attr=new_cedge_attr,
+                id=data.id
+                )
 
 
 def save_pickle(array, path):

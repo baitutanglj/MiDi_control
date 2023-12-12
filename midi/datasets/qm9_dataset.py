@@ -41,7 +41,7 @@ class QM9Dataset(InMemoryDataset):
     raw_url2 = 'https://ndownloader.figshare.com/files/3195404'
     processed_url = 'https://data.pyg.org/datasets/qm9_v3.zip'
 
-    def __init__(self, split, root, remove_h: bool, transform=None, pre_transform=None, pre_filter=None, val_template_num=200, test_template_num=200):
+    def __init__(self, split, root, dataset_cfg, transform=None, pre_transform=None, pre_filter=None, val_template_num=200, test_template_num=200):
         self.split = split
         if self.split == 'train':
             self.file_idx = 0
@@ -49,12 +49,16 @@ class QM9Dataset(InMemoryDataset):
             self.file_idx = 1
         elif self.split == 'test':
             self.file_idx = 2
-        self.remove_h = remove_h
+        self.dataset_cfg = dataset_cfg
+        self.remove_h = self.dataset_cfg.remove_h
         self.atom_encoder = full_atom_encoder
-        if remove_h:
+        if self.remove_h:
             self.atom_encoder = {k: v - 1 for k, v in self.atom_encoder.items() if k != 'H'}
         self.val_template_num = val_template_num
         self.test_template_num = test_template_num
+        self.control_data_dict = self.dataset_cfg.control_data_dict
+        self.control_add_noise_dict = self.dataset_cfg.control_add_noise_dict
+
         self.root = root
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
@@ -69,6 +73,15 @@ class QM9Dataset(InMemoryDataset):
         self.smiles = load_pickle(self.processed_paths[8])
         if len(self.processed_paths) > 9:
             self.template_data = torch.load(self.processed_paths[9])
+
+        self.data.cx = self.data.cx if self.control_data_dict['cX'] == 'cX' else self.data.x
+        self.data.ccharges = self.data.ccharges if self.control_data_dict['cX'] == 'cX' else self.data.charges
+        self.data.cedge_attr = self.data.cedge_attr if self.control_data_dict['cE'] == 'cE' else self.data.edge_attr
+        for i, _ in enumerate(self.template_data):
+                self.template_data[i].cx = self.template_data[i].cx if self.control_data_dict['cX'] == 'cX' else self.template_data[i].x
+                self.template_data[i].ccharges = self.template_data[i].ccharges if self.control_data_dict['cX'] == 'cX' else self.template_data[i].charges
+                self.template_data[i].cedge_attr = self.template_data[i].cedge_attr if self.control_data_dict['cE'] == 'cE' else self.template_data[i].edge_attr
+
 
     @property
     def raw_file_names(self):
@@ -147,12 +160,12 @@ class QM9Dataset(InMemoryDataset):
         val.to_csv(os.path.join(self.raw_dir, 'val.csv'))
         test.to_csv(os.path.join(self.raw_dir, 'test.csv'))
 
-        train_template = train.sample(n=self.val_template_num, random_state=0)
-        val_template = val.sample(n=self.val_template_num, random_state=0)
-        test_template = val.sample(n=self.test_template_num, random_state=0)
-        val_template.to_csv(os.path.join(self.raw_dir, 'val_template.csv'))
-        test_template.to_csv(os.path.join(self.raw_dir, 'test_template.csv'))
-        train_template.to_csv(os.path.join(self.raw_dir, 'train_template.csv'))
+        # train_template = train.sample(n=self.val_template_num, random_state=0)
+        # val_template = val.sample(n=self.val_template_num, random_state=0)
+        # test_template = val.sample(n=self.test_template_num, random_state=0)
+        # val_template.to_csv(os.path.join(self.raw_dir, 'val_template.csv'))
+        # test_template.to_csv(os.path.join(self.raw_dir, 'test_template.csv'))
+        # train_template.to_csv(os.path.join(self.raw_dir, 'train_template.csv'))
 
 
     def process(self):
@@ -167,6 +180,7 @@ class QM9Dataset(InMemoryDataset):
         suppl = Chem.SDMolSupplier(self.raw_paths[0], removeHs=False, sanitize=False)
         data_list, control_data_list = [], []
         all_smiles = []
+        # mol_id_list = []
         num_errors = 0
         for i, mol in enumerate(tqdm(suppl)):
             if i in skip or i not in target_df.index:
@@ -180,15 +194,12 @@ class QM9Dataset(InMemoryDataset):
             data = mol_to_torch_geometric(mol, full_atom_encoder, smiles)
             if self.remove_h:
                 data = remove_hydrogens(data)
+            # mol_id_list.append(mol.GetProp('_Name'))
 
             if self.pre_filter is not None and not self.pre_filter(data):
                 continue
             if self.pre_transform is not None:
                 data = self.pre_transform(data)
-
-            # if self.pre_control:
-            #     control_data = mol_to_control_data(data)
-            #     control_data_list.append(control_data)
 
             data_list.append(data)
         torch.save(self.collate(data_list), self.processed_paths[self.file_idx])
@@ -216,15 +227,17 @@ class QM9Dataset(InMemoryDataset):
 
 
 
+
+
 class QM9DataModule(AbstractDataModule):
     def __init__(self, cfg):
         self.datadir = cfg.dataset.datadir
         base_path = pathlib.Path(get_original_cwd()).parents[0]
         root_path = os.path.join(base_path, self.datadir)
 
-        train_dataset = QM9Dataset(split='train', root=root_path, remove_h=cfg.dataset.remove_h)
-        val_dataset = QM9Dataset(split='val', root=root_path, remove_h=cfg.dataset.remove_h)
-        test_dataset = QM9Dataset(split='test', root=root_path, remove_h=cfg.dataset.remove_h)
+        train_dataset = QM9Dataset(split='train', root=root_path, dataset_cfg=cfg.dataset, val_template_num=cfg.general.val_template_num)
+        val_dataset = QM9Dataset(split='val', root=root_path, dataset_cfg=cfg.dataset, val_template_num=cfg.general.val_template_num)
+        test_dataset = QM9Dataset(split='test', root=root_path, dataset_cfg=cfg.dataset, test_template_num=cfg.general.test_template_num)
         self.statistics = {'train': train_dataset.statistics, 'val': val_dataset.statistics,
                            'test': test_dataset.statistics}
         self.remove_h = cfg.dataset.remove_h

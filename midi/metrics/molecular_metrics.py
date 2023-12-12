@@ -1,4 +1,5 @@
 from rdkit import Chem
+from rdkit.Chem import QED
 import os
 from collections import Counter
 import math
@@ -25,7 +26,7 @@ class SamplingMetrics(nn.Module):
 
         self.train_smiles = train_smiles
         self.test = test
-        self.template = get_template_sdf(template, dataset_infos) if template else None
+        self.template, _ = get_template_sdf(template, dataset_infos) if template else None
 
         self.atom_stable = MeanMetric()
         self.mol_stable = MeanMetric()
@@ -71,11 +72,16 @@ class SamplingMetrics(nn.Module):
                         error_message[4] += 1
                     largest_mol = max(mol_frags, default=mol, key=lambda m: m.GetNumAtoms())
                     Chem.SanitizeMol(largest_mol)
-                    smiles = Chem.MolToSmiles(largest_mol)
+                    try:
+                        smiles = Chem.MolToSmiles(largest_mol)
+                        smiles = Chem.MolToSmiles(Chem.MolFromSmiles(smiles))
+                    except:
+                        smiles = None
                     valid.append(smiles)
                     all_smiles.append(smiles)
                     largest_mol.SetProp('smiles', smiles)
                     largest_mol.SetProp('template_idx', rdmol.GetProp('template_idx'))
+                    largest_mol.SetProp('qed', str(QED.qed(largest_mol)))
                     all_valid_mols[rdmol.GetProp('template_idx')].append(largest_mol)
                     error_message[-1] += 1
                 except Chem.rdchem.AtomValenceException:

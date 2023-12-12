@@ -74,6 +74,8 @@ class Molecule:
 
         try:
             mol = mol.GetMol()
+            if Chem.MolFromSmiles(Chem.MolToSmiles(mol)) is None:
+                return None
         except Chem.KekulizeException:
             print("Can't kekulize molecule")
             return None

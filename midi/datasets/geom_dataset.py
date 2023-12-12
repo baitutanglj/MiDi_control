@@ -25,16 +25,18 @@ full_atom_encoder = {'H': 0, 'B': 1, 'C': 2, 'N': 3, 'O': 4, 'F': 5, 'Al': 6, 'S
 
 
 class GeomDrugsDataset(InMemoryDataset):
-    def __init__(self, split, root, remove_h, transform=None, pre_transform=None, pre_filter=None, val_template_num=200, test_template_num=200):
+    def __init__(self, split, root, dataset_cfg, transform=None, pre_transform=None, pre_filter=None, val_template_num=200, test_template_num=200):
         assert split in ['train', 'val', 'test']
         self.split = split
-        self.remove_h = remove_h
-
+        self.dataset_cfg = dataset_cfg
+        self.remove_h = self.dataset_cfg.remove_h
         self.atom_encoder = full_atom_encoder
-        if remove_h:
+        if self.remove_h:
             self.atom_encoder = {k: v - 1 for k, v in self.atom_encoder.items() if k != 'H'}
         self.val_template_num = val_template_num
         self.test_template_num = test_template_num
+        self.control_data_dict = self.dataset_cfg.control_data_dict
+        self.control_add_noise_dict = self.dataset_cfg.control_add_noise_dict
 
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[0])
@@ -49,18 +51,25 @@ class GeomDrugsDataset(InMemoryDataset):
         if len(self.processed_paths) > 9:
             self.template_data = torch.load(self.processed_paths[9])
 
+        self.data.cx = self.data.cx if self.control_data_dict['cX'] == 'cX' else self.data.x
+        self.data.ccharges = self.data.ccharges if self.control_data_dict['cX'] == 'cX' else self.data.charges
+        self.data.cedge_attr = self.data.cedge_attr if self.control_data_dict['cE'] == 'cE' else self.data.edge_attr
+        for i, _ in enumerate(self.template_data):
+                self.template_data[i].cx = self.template_data[i].cx if self.control_data_dict['cX'] == 'cX' else self.template_data[i].x
+                self.template_data[i].ccharges = self.template_data[i].ccharges if self.control_data_dict['cX'] == 'cX' else self.template_data[i].charges
+                self.template_data[i].cedge_attr = self.template_data[i].cedge_attr if self.control_data_dict['cE'] == 'cE' else self.template_data[i].edge_attr
+
+
+
 
     @property
     def raw_file_names(self):
-        if os.path.isdir('/Users/clementvignac/'):
-            # This is my laptop
-            return ['subset.pickle']
         if self.split == 'train':
-            return ['train_data.pickle']
+            return ['train_data.txt']
         elif self.split == 'val':
-            return ['val_data.pickle']
+            return ['val_data.txt']
         else:
-            return ['test_data.pickle']
+            return ['test_data.txt']
 
     @property
     def processed_file_names(self):
@@ -68,7 +77,7 @@ class GeomDrugsDataset(InMemoryDataset):
         if self.split == 'train':
             return [f'train_{h}.pt', f'train_n_{h}.pickle', f'train_atom_types_{h}.npy', f'train_bond_types_{h}.npy',
                     f'train_charges_{h}.npy', f'train_valency_{h}.pickle', f'train_bond_lengths_{h}.pickle',
-                    f'train_angles_{h}.npy', 'train_smiles.pickle']
+                    f'train_angles_{h}.npy', 'train_smiles.pickle', f'train_template_{h}.pt']
         elif self.split == 'val':
             return [f'val_{h}.pt', f'val_n_{h}.pickle', f'val_atom_types_{h}.npy', f'val_bond_types_{h}.npy',
                     f'val_charges_{h}.npy', f'val_valency_{h}.pickle', f'val_bond_lengths_{h}.pickle',
@@ -84,13 +93,16 @@ class GeomDrugsDataset(InMemoryDataset):
 
     def process(self):
         RDLogger.DisableLog('rdApp.*')
-        all_data = load_pickle(self.raw_paths[0])
+        with open(self.raw_paths[0], 'r')as f:
+            all_files = f.read().splitlines()
 
-        data_list = []
         all_smiles = []
-        for i, data in enumerate(tqdm(all_data)):
-            smiles, all_conformers = data
+        data_list = []
+        for i, smiles in enumerate(tqdm(all_files)):
             all_smiles.append(smiles)
+            all_conformers = Chem.SDMolSupplier(f"{self.root}/raw/geom_drug_sdf/{smiles}.sdf", removeHs=False)
+            ## all_conformers = Chem.SDMolSupplier(f"/mnt/home/linjie/projects/diffusion_model/data/geom_drug_data/geom/raw/geom_drug_sdf/{smiles}.sdf", removeHs=False)
+
             for j, conformer in enumerate(all_conformers):
                 if j >= 5:
                     break
@@ -119,25 +131,17 @@ class GeomDrugsDataset(InMemoryDataset):
         save_pickle(set(all_smiles), self.processed_paths[8])
         torch.save(self.collate(data_list), self.processed_paths[0])
 
-        ############
-        if self.split in ['val', 'test']:
-            random.seed(0)
-            template_num = self.val_template_num if self.split=='val' else self.test_template_num
-            data_tmp = random.sample(all_data, template_num)
-            # data_tmp = all_data[:template_num]
-            template_data = []
-            for i, (smiles, conformers) in enumerate(data_tmp):
-                data = dataset_utils.mol_to_torch_geometric(conformers[0], full_atom_encoder, smiles)
-                if self.remove_h:
-                    data = dataset_utils.remove_hydrogens(data)
-                if self.pre_filter is not None and not self.pre_filter(data):
-                    continue
-                if self.pre_transform is not None:
-                    data = self.pre_transform(data)
-                data.idx = i
-                template_data.append(data)
 
-            torch.save(template_data, self.processed_paths[9])
+        ###########
+        template_num = self.test_template_num if self.split=='test' else self.val_template_num
+        # random.seed(0)
+        # template_data = random.sample(data_list, template_num)
+        template_data = data_list[::5][:template_num]
+        # template_data = data_list[:template_num]
+        for i in range(len(template_data)):
+            template_data[i].idx = i
+        torch.save(template_data, self.processed_paths[9])
+
 
 
 class GeomDataModule(AbstractAdaptiveDataModule):
@@ -146,9 +150,9 @@ class GeomDataModule(AbstractAdaptiveDataModule):
         base_path = pathlib.Path(get_original_cwd()).parents[0]
         root_path = os.path.join(base_path, self.datadir)
 
-        train_dataset = GeomDrugsDataset(split='train', root=root_path, remove_h=cfg.dataset.remove_h)
-        val_dataset = GeomDrugsDataset(split='val', root=root_path, remove_h=cfg.dataset.remove_h)
-        test_dataset = GeomDrugsDataset(split='test', root=root_path, remove_h=cfg.dataset.remove_h)
+        train_dataset = GeomDrugsDataset(split='train', root=root_path, dataset_cfg=cfg.dataset, val_template_num=cfg.general.val_template_num)
+        val_dataset = GeomDrugsDataset(split='val', root=root_path, dataset_cfg=cfg.dataset, val_template_num=cfg.general.val_template_num)
+        test_dataset = GeomDrugsDataset(split='test', root=root_path, dataset_cfg=cfg.dataset, test_template_num=cfg.general.test_template_num)
         self.remove_h = cfg.dataset.remove_h
         self.statistics = {'train': train_dataset.statistics, 'val': val_dataset.statistics,
                            'test': test_dataset.statistics}

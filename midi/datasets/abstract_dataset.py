@@ -118,7 +118,7 @@ class AbstractAdaptiveDataModule(Mixin, AdaptiveLightningDataset):
     def __init__(self, cfg, train_dataset, val_dataset, test_dataset):
         super().__init__(train_dataset, val_dataset, test_dataset, batch_size=cfg.train.batch_size,
                          reference_batch_size=cfg.train.reference_batch_size,
-                         num_workers=cfg.train.num_workers, shuffle='debug' not in cfg.general.name,
+                         num_workers=cfg.train.num_workers,
                          pin_memory=getattr(cfg.dataset, "pin_memory", False))
         self.cfg = cfg
 

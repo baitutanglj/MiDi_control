@@ -16,7 +16,8 @@ except ImportError:
 
 def effective_batch_size(max_size, reference_batch_size, reference_size=20, sampling=False):
     x = reference_batch_size * (reference_size / max_size) ** 2
-    return math.floor(1.8 * x) if sampling else math.floor(x)
+    return math.floor(2 * x)
+    # return math.floor(1.8 * x) if sampling else math.floor(x)
 
 
 class AdaptiveCollater:
@@ -65,6 +66,13 @@ class AdaptiveCollater:
 
             new_batch = Batch.from_data_list(to_keep, self.follow_batch, self.exclude_keys)
             return new_batch
+    # def __call__(self, batch):
+    #     # checks the number of node for basedata graphs and slots into appropriate buckets,
+    #     # errors on other options
+    #     elem = batch[0]
+    #     if isinstance(elem, BaseData):
+    #         new_batch = Batch.from_data_list(batch, self.follow_batch, self.exclude_keys)
+    #         return new_batch
 
         elif True:
             # early exit

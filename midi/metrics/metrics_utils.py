@@ -1,6 +1,6 @@
 import math
 from collections import Counter
-
+from tqdm import tqdm
 import numpy as np
 import torch
 from torch_geometric.data import Data
@@ -55,7 +55,7 @@ def node_counts(data_list):
 def atom_type_counts(data_list, num_classes):
     print("Computing node types distribution...")
     counts = np.zeros(num_classes)
-    for data in data_list:
+    for data in tqdm(data_list, total=len(data_list)):
         x = torch.nn.functional.one_hot(data.x, num_classes=num_classes)
         counts += x.sum(dim=0).numpy()
 
@@ -68,7 +68,7 @@ def edge_counts(data_list, num_bond_types=5):
     print("Computing edge counts...")
     d = np.zeros(num_bond_types)
 
-    for data in data_list:
+    for data in tqdm(data_list, total=len(data_list)):
         total_pairs = data.num_nodes * (data.num_nodes - 1)
 
         num_edges = data.edge_attr.shape[0]
@@ -88,7 +88,7 @@ def charge_counts(data_list, num_classes, charges_dic):
     d = np.zeros((num_classes, len(charges_dic)))
 
 
-    for data in data_list:
+    for data in tqdm(data_list, total=len(data_list)):
         for atom, charge in zip(data.x, data.charges):
             assert charge in [-2, -1, 0, 1, 2, 3]
             d[atom.item(), charges_dic[charge.item()]] += 1
@@ -105,7 +105,7 @@ def valency_count(data_list, atom_encoder):
     print("Computing valency counts...")
     valencies = {atom_type: Counter() for atom_type in atom_encoder.keys()}
 
-    for data in data_list:
+    for data in tqdm(data_list, total=len(data_list)):
         edge_attr = data.edge_attr
         edge_attr[edge_attr == 4] = 1.5
         bond_orders = edge_attr
@@ -129,7 +129,7 @@ def bond_lengths_counts(data_list, num_bond_types=5):
     """ Compute the bond lenghts separetely for each bond type. """
     print("Computing bond lengths...")
     all_bond_lenghts = {1: Counter(), 2: Counter(), 3: Counter(), 4: Counter()}
-    for data in data_list:
+    for data in tqdm(data_list, total=len(data_list)):
         cdists = torch.cdist(data.pos.unsqueeze(0), data.pos.unsqueeze(0)).squeeze(0)
         bond_distances = cdists[data.edge_index[0], data.edge_index[1]]
         for bond_type in range(1, num_bond_types):
@@ -152,7 +152,7 @@ def bond_angles(data_list, atom_encoder):
     atom_decoder = {v: k for k, v in atom_encoder.items()}
     print("Computing bond angles...")
     all_bond_angles = np.zeros((len(atom_encoder.keys()), 180 * 10 + 1))
-    for data in data_list:
+    for data in tqdm(data_list, total=len(data_list)):
         assert not torch.isnan(data.pos).any()
         for i in range(data.num_nodes):
             neighbors = data.edge_index[1][data.edge_index[0] == i]

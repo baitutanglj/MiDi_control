@@ -78,12 +78,16 @@ class TrainLoss(nn.Module):
         epoch_charges_loss = self.charges_loss.compute().item() if self.charges_loss > 0 else -1.0
         epoch_edge_loss = self.edge_loss.compute().item() if self.edge_loss.total_samples > 0 else -1.0
         epoch_y_loss = self.train_y_loss.compute().item() if self.y_loss.total_samples > 0 else -1.0
+        epoch_loss = (self.lambda_train[0] * epoch_pos_loss + self.lambda_train[1] * epoch_node_loss +
+                      self.lambda_train[2] * epoch_charges_loss + self.lambda_train[3] * epoch_edge_loss +
+                      self.lambda_train[4] * epoch_y_loss)
 
         to_log = {"train_epoch/pos_mse": epoch_pos_loss,
                   "train_epoch/x_CE": epoch_node_loss,
                   "train_epoch/charges_CE": epoch_charges_loss,
                   "train_epoch/E_CE": epoch_edge_loss,
-                  "train_epoch/y_CE": epoch_y_loss}
+                  "train_epoch/y_CE": epoch_y_loss,
+                  'train_epoch/epoch_loss': epoch_loss}
         if wandb.run:
             wandb.log(to_log, commit=False)
         return to_log

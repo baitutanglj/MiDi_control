@@ -9,12 +9,12 @@ import pathlib
 import hydra
 import omegaconf
 from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, early_stopping
 from pytorch_lightning.utilities.warnings import PossibleUserWarning
 
 from midi.datasets import qm9_dataset, geom_dataset
 from midi.diffusion_model import FullDenoisingDiffusion
-from utils import save_template
+from utils import save_template, save_template_new
 
 warnings.filterwarnings("ignore", category=PossibleUserWarning)
 
@@ -22,7 +22,8 @@ warnings.filterwarnings("ignore", category=PossibleUserWarning)
 def get_resume(cfg, dataset_infos, train_smiles, checkpoint_path, test: bool):
     name = cfg.general.name + ('_test' if test else '_resume')
     gpus = cfg.general.gpus
-    model = FullDenoisingDiffusion.load_from_checkpoint(checkpoint_path, dataset_infos=dataset_infos,
+    model = FullDenoisingDiffusion.load_from_checkpoint(checkpoint_path, map_location={'cuda:1': 'cuda:0'},
+                                                        dataset_infos=dataset_infos,
                                                         train_smiles=train_smiles)
     cfg.general.gpus = gpus
     cfg.general.name = name
@@ -63,8 +64,10 @@ def load_pretrained_model(model, pretrained_model_path):
 
 @hydra.main(version_base='1.3', config_path='../configs', config_name='config')
 def main(cfg: omegaconf.DictConfig):
+    print(f"***********control model layer:{cfg.model.n_layers}***********")
     dataset_config = cfg.dataset
-    pl.seed_everything(cfg.train.seed)
+    if cfg.general.test_only:
+        pl.seed_everything(cfg.train.seed)
     # print(f"cfg.train.batch_size:{cfg.train.batch_size}")
     if dataset_config.name in ['qm9', "geom"]:
         if dataset_config.name == 'qm9':
@@ -75,7 +78,7 @@ def main(cfg: omegaconf.DictConfig):
             datamodule = geom_dataset.GeomDataModule(cfg)
             dataset_infos = geom_dataset.GeomInfos(datamodule=datamodule, cfg=cfg)
 
-        train_smiles = list(datamodule.train_dataloader().dataset.smiles) if cfg.general.test_only else []
+        train_smiles = list(datamodule.train_dataloader().dataset.smiles)
 
     else:
         raise NotImplementedError("Unknown dataset {}".format(cfg["dataset"]))
@@ -83,9 +86,15 @@ def main(cfg: omegaconf.DictConfig):
     train_template = datamodule.train_dataset.template_data
     val_template = datamodule.val_dataset.template_data
     test_template = datamodule.test_dataset.template_data
-    save_template(train_template, dataset_infos, f"{datamodule.train_dataset.root}/train_template.sdf")
-    save_template(val_template, dataset_infos, f"{datamodule.val_dataset.root}/val_template.sdf")
-    save_template(test_template, dataset_infos, f"{datamodule.test_dataset.root}/test_template.sdf")
+    # train_template = save_template(train_template, dataset_infos, f"{datamodule.train_dataset.root}/train_template.sdf")
+    # val_template = save_template(val_template, dataset_infos, f"{datamodule.val_dataset.root}/val_template.sdf")
+    # test_template = save_template(test_template, dataset_infos, f"{datamodule.test_dataset.root}/test_template.sdf")
+    # save_template_new(train_template, dataset_infos, f"{datamodule.train_dataset.root}/train_template_new.sdf")
+    # save_template_new(val_template, dataset_infos, f"{datamodule.val_dataset.root}/val_template_new.sdf")
+    # save_template_new(test_template, dataset_infos, f"{datamodule.test_dataset.root}/test_template_new.sdf")
+    # torch.save(train_template, f"{datamodule.test_dataset.root}/processed/train_template_noh.pt")
+    # torch.save(val_template, f"{datamodule.test_dataset.root}/processed/val_template_noh.pt")
+    # torch.save(test_template, f"{datamodule.test_dataset.root}/processed/test_template_noh.pt")
 
     if cfg.general.test_only:
         cfg, _ = get_resume(cfg, dataset_infos, train_smiles, cfg.general.test_only, test=True)
@@ -110,13 +119,15 @@ def main(cfg: omegaconf.DictConfig):
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
                                               monitor='val/epoch_NLL',
-                                              save_top_k=10,
+                                              save_top_k=20,
                                               mode='min',
                                               every_n_epochs=1)
         # fix a name and keep overwriting
         last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
         callbacks.append(checkpoint_callback)
         callbacks.append(last_ckpt_save)
+        # early_stopping_callback = early_stopping.EarlyStopping(monitor='val/epoch_NLL', min_delta=0.0, patience=2, verbose=True, mode='min', strict=True)
+        # callbacks.append(early_stopping_callback)
 
     use_gpu = cfg.general.gpus > 0 and torch.cuda.is_available()
 

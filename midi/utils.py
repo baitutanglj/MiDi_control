@@ -2,6 +2,8 @@ import os
 from copy import deepcopy
 from typing import Optional, Union, Dict
 from rdkit import Chem
+from rdkit.Chem import AllChem
+from rdkit.Chem import QED
 import torch
 import torch.nn.functional as F
 from torch_geometric.utils import to_dense_adj, to_dense_batch, remove_self_loops, to_scipy_sparse_matrix
@@ -63,7 +65,7 @@ def create_folders(args):
         pass
 
 
-def to_dense(data, dataset_info, device=None):
+def to_dense(data, dataset_info, control_data_dict, device=None):
     X, node_mask = to_dense_batch(x=data.x, batch=data.batch)
     pos, _ = to_dense_batch(x=data.pos, batch=data.batch)
     pos = pos.float()
@@ -72,15 +74,18 @@ def to_dense(data, dataset_info, device=None):
     max_num_nodes = X.size(1)
     edge_index, edge_attr = remove_self_loops(data.edge_index, data.edge_attr)
     E = to_dense_adj(edge_index=edge_index, batch=data.batch, edge_attr=edge_attr, max_num_nodes=max_num_nodes)#torch.Size([64, 17, 17])
-
     X, charges, E = dataset_info.to_one_hot(X, charges=charges, E=E, node_mask=node_mask)
 
+    # cX_tmp = data.cx if control_data_dict['cX']=='cX' else data.x
+    # ccharges_tmp = data.ccharges if control_data_dict['cX']=='cX' else data.charges
+    # cedge_attr_tmp = data.cedge_attr if control_data_dict['cE']=='cE' else data.edge_attr
 
     cX, _ = to_dense_batch(x=data.cx, batch=data.batch)
+    ccharges, _ = to_dense_batch(x=data.ccharges, batch=data.batch)
+    cedge_index, cedge_attr = remove_self_loops(data.edge_index, data.cedge_attr)
+    cE = to_dense_adj(edge_index=cedge_index, batch=data.batch, edge_attr=cedge_attr, max_num_nodes=max_num_nodes)
     cpos, _ = to_dense_batch(x=data.pos, batch=data.batch)
     cpos = cpos.float()
-    ccharges, _ = to_dense_batch(x=data.ccharges, batch=data.batch)
-    cE = to_dense_adj(edge_index=edge_index, batch=data.batch, edge_attr=edge_attr, max_num_nodes=max_num_nodes)#torch.Size([64, 17, 17])
     cX, ccharges, cE = dataset_info.to_one_hot(cX, charges=ccharges, E=cE, node_mask=node_mask)
 
     y = X.new_zeros((X.shape[0], 0))
@@ -162,16 +167,16 @@ class PlaceHolder:
             self.pos = self.pos - self.pos.mean(dim=1, keepdim=True)
         assert torch.allclose(self.E, torch.transpose(self.E, 1, 2))
 
-        if self.cX is not None:
-            self.cX = self.cX * x_mask
-        if self.ccharges is not None:
-            self.ccharges = self.ccharges * x_mask
-        if self.cE is not None:
-            self.cE = self.cE * e_mask1 * e_mask2 * diag_mask
-            assert torch.allclose(self.E, torch.transpose(self.E, 1, 2))
-        if self.cpos is not None:
-            self.cpos = self.cpos * x_mask
-            self.cpos = self.cpos - self.cpos.mean(dim=1, keepdim=True)
+        # if self.cX is not None:
+        #     self.cX = self.cX * x_mask
+        # if self.ccharges is not None:
+        #     self.ccharges = self.ccharges * x_mask
+        # if self.cE is not None:
+        #     self.cE = self.cE * e_mask1 * e_mask2 * diag_mask
+        #     # assert torch.allclose(self.E, torch.transpose(self.E, 1, 2))
+        # if self.cpos is not None:
+        #     self.cpos = self.cpos * x_mask
+        #     self.cpos = self.cpos - self.cpos.mean(dim=1, keepdim=True)
 
         return self
 
@@ -193,6 +198,7 @@ class PlaceHolder:
         # copy.cX[self.node_mask == 0] = - 1
         # copy.ccharges[self.node_mask == 0] = 1000
         # copy.cE[(e_mask1 * e_mask2).squeeze(-1) == 0] = - 1
+
         copy.cX = self.cX
         copy.ccharges = self.ccharges
         copy.cE = self.cE
@@ -218,7 +224,7 @@ class PlaceHolder:
                            node_mask=self.node_mask, cX=self.cX, ccharges=self.ccharges, cE=self.cE, cy=self.cy, cpos=self.cpos,
                            idx=self.idx)
 
-    def control_scales(self, scale):
+    def mul_scales(self, scale):
         X = scale * self.X if self.X is not None else self.X
         charges = scale * self.charges if self.charges is not None else self.charges
         E = scale * self.E if self.E is not None else self.E
@@ -232,6 +238,14 @@ class PlaceHolder:
         E = self.E - feature.E if self.E is not None else self.E
         y = self.y - feature.y if self.y is not None else self.y
         pos = self.pos - feature.pos if self.pos is not None else self.pos
+        return PlaceHolder(X=X, charges=charges, E=E, y=y, pos=pos, node_mask=node_mask)
+
+    def add_scales(self, feature, node_mask):
+        X = self.X + feature.X if self.X is not None else self.X
+        charges = self.charges + feature.charges if self.charges is not None else self.charges
+        E = self.E + feature.E if self.E is not None else self.E
+        y = self.y + feature.y if self.y is not None else self.y
+        pos = self.pos + feature.pos if self.pos is not None else self.pos
         return PlaceHolder(X=X, charges=charges, E=E, y=y, pos=pos, node_mask=node_mask)
 
 
@@ -261,8 +275,48 @@ def remove_mean_with_mask(x, node_mask):
 
 def get_template_sdf(template_list, dataset_infos):
     template_batch = Batch.from_data_list(template_list)
-    dense_data = to_dense(template_batch, dataset_infos)
+    dense_data = to_dense(template_batch, dataset_infos, control_data_dict={'cX': 'cX', 'cE': 'cE', 'cpos': 'cpos'})
     dense_data = dense_data.collapse(dataset_infos.collapse_charges)
+    molecule_list, template_list_new = [], []
+    count = 0
+    for i in range(len(template_list)):
+        mol = Molecule(atom_types=dense_data.X[i], charges=dense_data.charges[i],
+                       bond_types=dense_data.E[i], positions=dense_data.pos[i],
+                       atom_decoder=dataset_infos.atom_decoder,
+                       template_idx=i).rdkit_mol
+        if mol is not None:
+            mol.SetProp('template_idx', str(count))
+            molecule_list.append(mol)
+            template_list[i].idx = count
+            template_list_new.append(template_list[i])
+            count += 1
+        else:
+            print(f"template {i} is None")
+
+    return molecule_list, template_list_new
+
+def save_template(template_list, dataset_infos, sdf_filename):
+    molecule_list, template_list_new = get_template_sdf(template_list, dataset_infos)
+    with Chem.SDWriter(sdf_filename) as f:
+        for i, (mol, data) in enumerate(zip(molecule_list, template_list_new)):
+            if mol is not None:
+                # mol.SetProp('smiles', Chem.MolToSmiles(mol))
+                mol.SetProp('smiles', data.smiles)
+                mol.SetProp('qed', str(QED.qed(mol)))
+                mol.SetProp('id', data.id)
+                f.write(mol)
+    print('*'*10)
+
+    return template_list_new
+
+
+def get_template_sdf_new(template_list, dataset_infos):
+    template_batch = Batch.from_data_list(template_list)
+    dense_data = to_dense(template_batch, dataset_infos)
+    dense_data_control = PlaceHolder(X=dense_data.cX, charges=dense_data.ccharges,
+                                     pos=dense_data.cpos, E=dense_data.cE, y=dense_data.cy,
+                                     node_mask=dense_data.node_mask)
+    dense_data = dense_data_control.collapse(dataset_infos.collapse_charges)
     molecule_list = []
     for i in range(len(template_list)):
         molecule_list.append(Molecule(atom_types=dense_data.X[i], charges=dense_data.charges[i],
@@ -271,8 +325,9 @@ def get_template_sdf(template_list, dataset_infos):
                                       template_idx=i).rdkit_mol)
     return molecule_list
 
-def save_template(template_list, dataset_infos, sdf_filename):
-    molecule_list = get_template_sdf(template_list, dataset_infos)
+
+def save_template_new(template_list, dataset_infos, sdf_filename):
+    molecule_list = get_template_sdf_new(template_list, dataset_infos)
     with Chem.SDWriter(sdf_filename) as f:
         for i, mol in enumerate(molecule_list):
             mol.SetProp('smiles', Chem.MolToSmiles(mol))
